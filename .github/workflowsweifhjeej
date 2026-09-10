@@ -1,0 +1,162 @@
+name: Build SidePlay APK
+
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Extract full SidePlay source
+        run: |
+          echo "Files in repository:"
+          ls -la
+
+          test -f SidePlay-Node-v0.3.1-phone-cloud-builder.zip || {
+            echo "ERROR: SidePlay ZIP is missing from repository root."
+            exit 1
+          }
+
+          rm -rf sideplay
+          mkdir -p sideplay
+
+          unzip -q SidePlay-Node-v0.3.1-phone-cloud-builder.zip -d sideplay
+
+          echo "Extracted SidePlay:"
+          ls -la sideplay
+
+          test -f sideplay/package.json || {
+            echo "ERROR: package.json was not extracted."
+            exit 1
+          }
+
+          test -f sideplay/src/App.tsx || {
+            echo "ERROR: src/App.tsx was not extracted."
+            exit 1
+          }
+
+          test -f sideplay/scripts/patch-android.mjs || {
+            echo "ERROR: Android patcher was not extracted."
+            exit 1
+          }
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+
+      - name: Install JavaScript dependencies
+        working-directory: sideplay
+        run: |
+          npm install --no-audit --no-fund
+
+      - name: Build SidePlay web UI
+        working-directory: sideplay
+        run: |
+          npm run build
+
+      - name: Create Capacitor Android project
+        working-directory: sideplay
+        run: |
+          if [ ! -d android ]; then
+            echo "Creating Android project..."
+            npx cap add android
+          fi
+
+          echo "Syncing Capacitor..."
+          npx cap sync android
+
+      - name: Apply SidePlay native Android patches
+        working-directory: sideplay
+        run: |
+          node scripts/patch-android.mjs
+
+          echo "Checking native SidePlay classes..."
+
+          test -f android/app/src/main/java/app/sideplay/mobile/PlaybackService.java
+          test -f android/app/src/main/java/app/sideplay/mobile/BackgroundAudioPlugin.java
+          test -f android/app/src/main/java/app/sideplay/mobile/SpotifySessionPlugin.java
+          test -f android/app/src/main/java/app/sideplay/mobile/SpotifySessionListenerService.java
+
+      - name: Show generated Android manifest
+        working-directory: sideplay
+        run: |
+          grep -n "SpotifySessionListenerService" android/app/src/main/AndroidManifest.xml || true
+          grep -n "PlaybackService" android/app/src/main/AndroidManifest.xml || true
+
+      - name: Build debug APK
+        working-directory: sideplay/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug \
+            --build-cache \
+            --stacktrace \
+            --no-daemon
+
+      - name: Prepare SidePlay APK
+        run: |
+          mkdir -p release
+
+          test -f sideplay/android/app/build/outputs/apk/debug/app-debug.apk || {
+            echo "ERROR: Gradle completed but app-debug.apk was not found."
+            exit 1
+          }
+
+          cp \
+            sideplay/android/app/build/outputs/apk/debug/app-debug.apk \
+            release/SidePlay-debug.apk
+
+          sha256sum release/SidePlay-debug.apk > release/SHA256.txt
+
+          cat > release/README.txt <<'EOF'
+          SidePlay v0.3.1
+          Spotify Session Engine
+          Debug Android APK
+
+          Package:
+          app.sideplay.mobile
+
+          Install SidePlay-debug.apk on Android.
+
+          For the experimental Spotify background engine:
+          1. Install Spotify.
+          2. Open Spotify and play something once.
+          3. Open SidePlay.
+          4. Go to Settings.
+          5. Grant SidePlay Notification Access.
+          6. Refresh Spotify engine status.
+          7. Enable Prefer Spotify for online tracks.
+          EOF
+
+          echo "APK information:"
+          ls -lh release/
+
+      - name: Upload SidePlay APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SidePlay-v0.3.1-APK
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
